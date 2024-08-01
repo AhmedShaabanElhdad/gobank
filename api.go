@@ -4,10 +4,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"strconv"
+	"time"
 
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/gorilla/mux"
 )
+
+////////////////////////////////// Server /////////////////////////////////////
 
 // server should has listen address will use in mux as usual
 // also give you the power to change with dev or other environment
@@ -23,6 +28,8 @@ func NewApiServer(listentAddr string, store Storage) *APIServer {
 		store:         store,
 	}
 }
+
+////////////////////////////////// Router /////////////////////////////////////
 
 // this is use to start our server
 func (s *APIServer) Run() {
@@ -136,6 +143,80 @@ func getID(r *http.Request) (int, error) {
 	}
 	return id, nil
 }
+
+func permissionDenided(w http.ResponseWriter) {
+	writeJson(w, http.StatusForbidden, ApiError{Error: "Permission Denied"})
+}
+
+////////////////////////////////// Token Helper /////////////////////////////////////
+
+// this is another decorator start from check jwt -> handlerFunc
+func withJwtAuth(handlerFunc http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		// imagine we will add in header in x-jwt-token
+		tokenString := r.Header.Get("x-jwt-token")
+		token, err := verifyToken(tokenString)
+		if err != nil {
+			permissionDenided(w)
+			return
+		}
+		if !token.Valid {
+			permissionDenided(w)
+			return
+		}
+
+		// this is one of tricky way to get propery as mapClaims
+		AccountId, err := getID(r)
+		if err != nil {
+			writeJson(w, http.StatusBadRequest, "Missing required Data")
+			return
+		}
+
+		claims := token.Claims.(jwt.MapClaims)
+		// this how you can get the type from claims
+		// be carful if u use your own claims as at the end will be map so becarful of the type
+		// panic(reflect.TypeOf(claims["AccountId"]))  // return float64
+		if int(claims["AccountId"].(float64)) != AccountId {
+			permissionDenided(w)
+			return
+		}
+
+		handlerFunc(w, r)
+	}
+}
+
+// normal will take user to build claims but we will treat account as user for now
+func createJwtAuth(account *Account) (string, error) {
+	// Create the Claims
+	//  use &jwt.RegisteredClaims is create Claim with Standard value
+	claims := &jwt.MapClaims{
+		"ExpiresAt": jwt.NewNumericDate(time.Unix(1516239022, 0)),
+		"AccountId": account.ID,
+	}
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	mySigningKey := os.Getenv("JWT_SECRET")
+	return token.SignedString([]byte(mySigningKey))
+}
+
+func verifyToken(tokenString string) (*jwt.Token, error) {
+
+	// need to move this outside the environment to for example github secret
+	// we can use export JWT_SECRET=bank5454 for now
+	// var secretKey = []byte("secret-key")
+	secrets := os.Getenv("JWT_SECRET")
+
+	// we need to convert the string to Token object using Parse which will return (*jwt.Token, error)
+	return jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
+		// Don't forget to validate the alg is what you expect:
+		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, fmt.Errorf("Unexpected signing method: %v", token.Header["alg"])
+		}
+		// hmacSampleSecret is a []byte containing your secret, e.g. []byte("my_secret_key")
+		return []byte(secrets), nil
+	})
+}
+
+////////////////////////////////// Middleware  /////////////////////////////////////
 
 // router.HandleFunc("/account", s.handleAccount) --> s.handleAccount return error not in func(http.ResponseWriter, *http.Request) without any return
 // we need to convert our function to http.HandlerFunc
