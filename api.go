@@ -9,13 +9,18 @@ import (
 	"github.com/gorilla/mux"
 )
 
+// server should has listen address will use in mux as usual
+// also give you the power to change with dev or other environment
+// also server will need db store to make CRUD
 type APIServer struct {
 	listenAddress string
+	store         Storage
 }
 
-func NewApiServer(listentAddr string) *APIServer {
+func NewApiServer(listentAddr string, store Storage) *APIServer {
 	return &APIServer{
 		listenAddress: listentAddr,
+		store:         store,
 	}
 }
 
@@ -27,12 +32,19 @@ func (s *APIServer) Run() {
 
 	router.HandleFunc("/account/{id}", makeHttpHandlerFunc(s.handleSpecificAccount))
 
+	router.HandleFunc("/accounts", makeHttpHandlerFunc(s.handleGetAccounts))
+
+	// here is not a good approach to show accountNumber related to security and privacy and can be show in browser history
+	// router.HandleFunc("/transfer/{accountNumber}", makeHttpHandlerFunc(s.handleTransfer))
+
+	router.HandleFunc("/transfer", makeHttpHandlerFunc(s.handleTransfer))
+
 	http.ListenAndServe(s.listenAddress, router)
 }
 
 func (s *APIServer) handleAccount(w http.ResponseWriter, r *http.Request) error {
-	if r.Method == "GET" {
-		return s.handleGetAccount(w, r)
+	if r.Method == "PUT" {
+		return s.handleUpdateccount(w, r)
 	}
 	if r.Method == "POST" {
 		return s.handleCreateAccount(w, r)
@@ -45,35 +57,84 @@ func (s *APIServer) handleAccount(w http.ResponseWriter, r *http.Request) error 
 
 func (s *APIServer) handleSpecificAccount(w http.ResponseWriter, r *http.Request) error {
 	if r.Method == "GET" {
-		id := mux.Vars(r)["id"]
-		i, err := strconv.Atoi(id)
+		id, err := getID(r)
 		if err != nil {
-			return fmt.Errorf("id %s not found ", i)
+			return err
 		}
-		writeJson(w, http.StatusOK, &Account{
-			ID: i,
-		})
-		return s.handleGetAccount(w, r)
+		account, err := s.store.GetAccountByID(id)
+		if err != nil {
+			return err
+		}
+		return writeJson(w, http.StatusOK, account)
 	}
 	return fmt.Errorf("method not allowed %s", r.Method)
 }
 
-func (s *APIServer) handleGetAccount(w http.ResponseWriter, r *http.Request) error {
-	account := NewAccount("Ahmed", "Shaban")
-	return writeJson(w, http.StatusOK, account)
+func (s *APIServer) handleGetAccounts(w http.ResponseWriter, r *http.Request) error {
+	if r.Method == "GET" {
+		sqlRes, err := s.store.GetAccounts()
+		if err != nil {
+			return err
+		}
+		return writeJson(w, http.StatusOK, sqlRes)
+	}
+	return fmt.Errorf("method not allowed %s", r.Method)
 }
 
 func (s *APIServer) handleCreateAccount(w http.ResponseWriter, r *http.Request) error {
+	createAccountRequest := new(CreateAccountRequest) // -->  return pointer and will use it in json and other stuff so better to use pointer
+	// createAccountRequest := CreateAccountRequest{}    --> return instance not pointer so will need to use &createAccountRequest
+	if err := json.NewDecoder(r.Body).Decode(createAccountRequest); err != nil {
+		return err
+	}
+	defer r.Body.Close()
+	account := NewAccount(
+		createAccountRequest.FirstName,
+		createAccountRequest.LastName,
+	)
+	if err := s.store.CreateAccount(account); err != nil {
+		return err
+	}
 
+	return writeJson(w, http.StatusCreated, account)
+}
+
+func (s *APIServer) handleUpdateccount(w http.ResponseWriter, r *http.Request) error {
 	return nil
 }
 
 func (s *APIServer) handleDeleteAccount(w http.ResponseWriter, r *http.Request) error {
-	return nil
+	id, err := getID(r)
+	if err != nil {
+		return err
+	}
+	if err := s.store.DeleteAccount(id); err != nil {
+		return err
+	}
+	return writeJson(w, http.StatusOK, map[string]int{"deleted": id})
 }
 
 func (s *APIServer) handleTransfer(w http.ResponseWriter, r *http.Request) error {
-	return nil
+	if r.Method == "POST" {
+		transferRequest := new(TransferRequest)
+		if err := json.NewDecoder(r.Body).Decode(transferRequest); err != nil {
+			return err
+		}
+		defer r.Body.Close()
+
+		return writeJson(w, http.StatusCreated, transferRequest)
+	}
+	return fmt.Errorf("method not allowed %s", r.Method)
+
+}
+
+func getID(r *http.Request) (int, error) {
+	idStr := mux.Vars(r)["id"]
+	id, err := strconv.Atoi(idStr)
+	if err != nil {
+		return id, fmt.Errorf("invalid id given %s", idStr)
+	}
+	return id, nil
 }
 
 // router.HandleFunc("/account", s.handleAccount) --> s.handleAccount return error not in func(http.ResponseWriter, *http.Request) without any return
@@ -83,7 +144,7 @@ func (s *APIServer) handleTransfer(w http.ResponseWriter, r *http.Request) error
 type apiFunc func(http.ResponseWriter, *http.Request) error
 
 type ApiError struct {
-	Error string
+	Error string `json:"error"`
 }
 
 // here we need remove the error to be HandlerFunc
@@ -102,6 +163,7 @@ func makeHttpHandlerFunc(f apiFunc) http.HandlerFunc {
 
 // Now as we make restful api will make json for response
 // Encode function return error
+// will use it in correct response or error
 func writeJson(w http.ResponseWriter, status int, value any) error {
 	w.WriteHeader(status)
 	w.Header().Add("Content-Type", "application/json")
